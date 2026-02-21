@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>StockAI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+    :root{
+      --bg:#05070f;
+      --bg2:#090c18;
+      --bg3:#0d1020;
+      --surface:#111520;
+      --border:#1a2040;
+      --border2:#243060;
+      --text:#e8eaf5;
+      --text2:#7880a8;
+      --text3:#3a4060;
+      --green:#00e676;
+      --green-bg:rgba(0,230,118,0.06);
+      --red:#ff3d5a;
+      --red-bg:rgba(255,61,90,0.06);
+      --accent:#4d7cff;
+      --accent2:#7b9fff;
+      --gold:#ffc947;
+      --font:'Space Grotesk',sans-serif;
+      --mono:'Space Mono',monospace;
+    }
+    html,body,#root{height:100%;width:100%;}
+    body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;line-height:1.5;overflow:hidden;}
+    @keyframes fadeIn{from{opacity:0;}to{opacity:1;}}
+    @keyframes slideUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+    @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
+    @keyframes spin{to{transform:rotate(360deg);}}
+    @keyframes ticker{0%{transform:translateX(0);}100%{transform:translateX(-50%);}}
+    ::-webkit-scrollbar{width:3px;}
+    ::-webkit-scrollbar-track{background:transparent;}
+    ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
+    button,input,textarea{font-family:inherit;}
+    input:focus,textarea:focus{outline:none;}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+const API = "http://localhost:8000";
+
+const WATCHLIST = ["AAPL","NVDA","TSLA","MSFT","GOOGL","META","AMZN","SPY"];
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// ── Utilities ─────────────────────────────────────────────────
+const fmt = (n, dec=2) => n != null ? Number(n).toFixed(dec) : '—';
+const fmtBig = (n) => {
+  if (!n) return '—';
+  if (n >= 1e12) return `$${(n/1e12).toFixed(2)}T`;
+  if (n >= 1e9) return `$${(n/1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `$${(n/1e6).toFixed(2)}M`;
+  return `$${n}`;
+};
+const fmtVol = (n) => {
+  if (!n) return '—';
+  if (n >= 1e9) return `${(n/1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `${(n/1e6).toFixed(2)}M`;
+  if (n >= 1e3) return `${(n/1e3).toFixed(2)}K`;
+  return String(n);
+};
+const isUp = (pct) => pct >= 0;
+const Spinner = ({size=14}) => (
+  <div style={{width:size,height:size,border:`2px solid var(--border2)`,borderTopColor:'var(--accent)',borderRadius:'50%',animation:'spin 0.7s linear infinite'}}/>
+);
+
+// ── Mini Sparkline Chart ──────────────────────────────────────
+function Sparkline({ bars, color, width=80, height=30 }) {
+  if (!bars?.length) return null;
+  const closes = bars.map(b => b.close).filter(Boolean);
+  if (!closes.length) return null;
+  const min = Math.min(...closes);
+  const max = Math.max(...closes);
+  const range = max - min || 1;
+  const w = width, h = height;
+  const pts = closes.map((v, i) => {
+    const x = (i / (closes.length - 1)) * w;
+    const y = h - ((v - min) / range) * h;
+    return `${x},${y}`;
+  }).join(' ');
+  return (
+    <svg width={w} height={h} style={{display:'block'}}>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+
+// ── Full Price Chart ──────────────────────────────────────────
+function PriceChart({ bars, range, ticker }) {
+  if (!bars?.length) return (
+    <div style={{height:220,display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text3)',fontSize:12,fontFamily:'var(--mono)'}}>
+      No data for this range
+    </div>
+  );
+
+  const closes = bars.map(b => b.close).filter(Boolean);
+  const min = Math.min(...closes) * 0.998;
+  const max = Math.max(...closes) * 1.002;
+  const range_ = max - min || 1;
+  const W = 800, H = 200, PAD = { top:10, right:10, bottom:30, left:60 };
+  const cW = W - PAD.left - PAD.right;
+  const cH = H - PAD.top - PAD.bottom;
+
+  const x = (i) => PAD.left + (i / (bars.length - 1)) * cW;
+  const y = (v) => PAD.top + cH - ((v - min) / range_) * cH;
+
+  const pts = bars.map((b, i) => `${x(i)},${y(b.close)}`).join(' ');
+  const areaPath = `M${x(0)},${y(bars[0].close)} ` +
+    bars.slice(1).map((b,i) => `L${x(i+1)},${y(b.close)}`).join(' ') +
+    ` L${x(bars.length-1)},${PAD.top+cH} L${x(0)},${PAD.top+cH} Z`;
+
+  const pctChange = bars.length > 1
+    ? ((bars[bars.length-1].close - bars[0].close) / bars[0].close * 100)
+    : 0;
+  const color = pctChange >= 0 ? 'var(--green)' : 'var(--red)';
+  const fillColor = pctChange >= 0 ? 'rgba(0,230,118,0.06)' : 'rgba(255,61,90,0.06)';
+
+  // Y axis labels
+  const yLabels = [0, 0.25, 0.5, 0.75, 1].map(t => ({
+    val: min + t * range_,
+    yPos: PAD.top + cH - t * cH,
+  }));
+
+  // X axis labels — show ~5 evenly spaced dates
+  const xStep = Math.floor(bars.length / 4);
+  const xLabels = [0, xStep, xStep*2, xStep*3, bars.length-1]
+    .filter(i => i < bars.length)
+    .map(i => ({ label: bars[i].date.slice(range === '1D' ? 11 : 5), xPos: x(i) }));
+
+  return (
+    <div style={{width:'100%',overflowX:'auto'}}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',height:'auto',display:'block'}}>
+        {/* Grid lines */}
+        {yLabels.map(({yPos},i) => (
+          <line key={i} x1={PAD.left} y1={yPos} x2={W-PAD.right} y2={yPos}
+            stroke="var(--border)" strokeWidth="1" strokeDasharray="4,4"/>
+        ))}
+        {/* Y labels */}
+        {yLabels.map(({val,yPos},i) => (
+          <text key={i} x={PAD.left-6} y={yPos+4} textAnchor="end"
+            fontSize="9" fill="var(--text3)" fontFamily="Space Mono">
+            ${fmt(val)}
+          </text>
+        ))}
+        {/* X labels */}
+        {xLabels.map(({label,xPos},i) => (
+          <text key={i} x={xPos} y={H-6} textAnchor="middle"
+            fontSize="9" fill="var(--text3)" fontFamily="Space Mono">
+            {label}
+          </text>
+        ))}
+        {/* Area fill */}
+        <path d={areaPath} fill={fillColor}/>
+        {/* Line */}
+        <polyline points={pts} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round"/>
+        {/* Last price dot */}
+        <circle cx={x(bars.length-1)} cy={y(bars[bars.length-1].close)} r="3" fill={color}/>
+      </svg>
+    </div>
+  );
+}
+
+// ── Watchlist Item ────────────────────────────────────────────
+function WatchItem({ ticker, active, onClick, index }) {
+  const [data, setData] = useState(null);
+  const [bars, setBars] = useState([]);
+
+  useEffect(() => {
+    // Stagger requests by 600ms per item to avoid Polygon rate limit (5/min)
+    const delay = index * 600;
+    const timer = setTimeout(async () => {
+      try {
+        const d = await fetch(`${API}/stock/${ticker}`).then(r => r.json());
+        setData(d);
+      } catch {}
+      try {
+        await sleep(300);
+        const d = await fetch(`${API}/stock/${ticker}/history?range=1W`).then(r => r.json());
+        setBars(d.bars || []);
+      } catch {}
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [ticker]);
+
+  const snap = data?.snapshot;
+  const up = snap?.change_pct >= 0;
+
+  return (
+    <div onClick={onClick} style={{
+      padding:'12px 14px',borderRadius:8,cursor:'pointer',
+      background: active ? 'var(--surface)' : 'transparent',
+      border:`1px solid ${active ? 'var(--border2)' : 'transparent'}`,
+      transition:'all 0.15s',display:'flex',alignItems:'center',gap:10,
+    }}
+      onMouseEnter={e=>{ if(!active) e.currentTarget.style.background='var(--bg3)'; }}
+      onMouseLeave={e=>{ if(!active) e.currentTarget.style.background='transparent'; }}
+    >
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontWeight:600,fontSize:13,color: active ? 'var(--accent2)' : 'var(--text)'}}>{ticker}</div>
+        <div style={{fontSize:10,color:'var(--text3)',fontFamily:'var(--mono)',marginTop:1}}>
+          {snap ? `$${fmt(snap.price)}` : '···'}
+        </div>
+      </div>
+      <Sparkline bars={bars} color={up ? 'var(--green)' : 'var(--red)'} width={50} height={24}/>
+      {snap && (
+        <div style={{
+          fontSize:10,fontFamily:'var(--mono)',fontWeight:700,
+          color: up ? 'var(--green)' : 'var(--red)',
+          minWidth:48,textAlign:'right',
+        }}>
+          {up ? '+' : ''}{fmt(snap.change_pct)}%
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── News Card ─────────────────────────────────────────────────
+function NewsCard({ article }) {
+  const sentColor = article.sentiment === 'positive' ? 'var(--green)' :
+                    article.sentiment === 'negative' ? 'var(--red)' : 'var(--text3)';
+  return (
+    <a href={article.url} target="_blank" rel="noopener" style={{textDecoration:'none'}}>
+      <div style={{
+        padding:'12px 14px',borderRadius:8,
+        background:'var(--bg3)',border:'1px solid var(--border)',
+        transition:'border-color 0.15s',cursor:'pointer',
+      }}
+        onMouseEnter={e=>e.currentTarget.style.borderColor='var(--border2)'}
+        onMouseLeave={e=>e.currentTarget.style.borderColor='var(--border)'}
+      >
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:8,marginBottom:4}}>
+          <div style={{fontSize:12,fontWeight:500,color:'var(--text)',lineHeight:1.4,flex:1}}>
+            {article.title}
+          </div>
+          {article.sentiment && (
+            <div style={{
+              fontSize:9,fontFamily:'var(--mono)',color:sentColor,
+              border:`1px solid ${sentColor}`,padding:'1px 5px',
+              borderRadius:3,flexShrink:0,textTransform:'uppercase',opacity:0.8,
+            }}>{article.sentiment}</div>
+          )}
+        </div>
+        <div style={{fontSize:10,color:'var(--text3)',fontFamily:'var(--mono)'}}>
+          {article.publisher} · {article.published}
+        </div>
+      </div>
+    </a>
+  );
+}
+
+// ── Chat Panel ────────────────────────────────────────────────
+function ChatPanel({ contextTicker }) {
+  const [messages, setMessages] = useState([{
+    role: 'assistant',
+    content: `I'm your AI market analyst. Ask me anything about stocks — prices, news, trends, comparisons. I'll fetch live data to answer.${contextTicker ? ` Currently viewing: **${contextTicker}**` : ''}`,
+  }]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const send = async () => {
+    const q = input.trim();
+    if (!q || loading) return;
+    setInput('');
+    setLoading(true);
+
+    setMessages(prev => [...prev, { role: 'user', content: q }]);
+    const msgId = Date.now();
+    setMessages(prev => [...prev, { id: msgId, role: 'assistant', content: '', streaming: true }]);
+
+    try {
+      const res = await fetch(`${API}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: q,
+          context_ticker: contextTicker,
+          history: messages.slice(-6).map(m => ({ role: m.role, content: m.content })),
+        }),
+      });
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.type === 'token') {
+              setMessages(prev => prev.map(m =>
+                m.id === msgId ? { ...m, content: m.content + evt.text } : m
+              ));
+            } else if (evt.type === 'done') {
+              setMessages(prev => prev.map(m =>
+                m.id === msgId ? { ...m, streaming: false } : m
+              ));
+            }
+          } catch {}
+        }
+      }
+    } catch {
+      setMessages(prev => prev.map(m =>
+        m.id === msgId ? { ...m, content: 'Error connecting to backend.', streaming: false } : m
+      ));
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',height:'100%'}}>
+      {/* Header */}
+      <div style={{padding:'14px 16px',borderBottom:'1px solid var(--border)',flexShrink:0}}>
+        <div style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--accent)',letterSpacing:'0.1em'}}>AI ANALYST</div>
+        {contextTicker && (
+          <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>Context: {contextTicker}</div>
+        )}
+      </div>
+
+      {/* Messages */}
+      <div style={{flex:1,overflowY:'auto',padding:'12px',display:'flex',flexDirection:'column',gap:10}}>
+        {messages.map((msg, i) => (
+          <div key={i} style={{
+            animation:'slideUp 0.2s ease',
+            alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+            maxWidth:'90%',
+          }}>
+            {msg.role === 'user' ? (
+              <div style={{
+                background:'var(--accent)',color:'white',
+                padding:'8px 12px',borderRadius:'12px 12px 4px 12px',
+                fontSize:12,lineHeight:1.5,
+              }}>{msg.content}</div>
+            ) : (
+              <div style={{
+                background:'var(--surface)',border:'1px solid var(--border)',
+                padding:'10px 12px',borderRadius:'4px 12px 12px 12px',
+                fontSize:12,lineHeight:1.7,color:'var(--text)',
+                whiteSpace:'pre-wrap',
+              }}>
+                {msg.content}
+                {msg.streaming && (
+                  <span style={{display:'inline-block',width:6,height:12,background:'var(--accent)',marginLeft:2,verticalAlign:'text-bottom',animation:'pulse 1s ease infinite'}}/>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+        <div ref={bottomRef}/>
+      </div>
+
+      {/* Input */}
+      <div style={{padding:'10px 12px',borderTop:'1px solid var(--border)',flexShrink:0}}>
+        <div style={{display:'flex',gap:6}}>
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && send()}
+            placeholder="Ask about any stock..."
+            disabled={loading}
+            style={{
+              flex:1,background:'var(--bg3)',border:'1px solid var(--border)',
+              borderRadius:8,padding:'8px 10px',color:'var(--text)',
+              fontSize:12,transition:'border-color 0.15s',
+            }}
+            onFocus={e=>e.target.style.borderColor='var(--accent)'}
+            onBlur={e=>e.target.style.borderColor='var(--border)'}
+          />
+          <button onClick={send} disabled={loading||!input.trim()} style={{
+            background: input.trim() ? 'var(--accent)' : 'var(--bg3)',
+            border:'none',color:'white',padding:'8px 12px',
+            borderRadius:8,cursor:input.trim()?'pointer':'default',
+            fontSize:14,transition:'all 0.15s',
+          }}>↑</button>
+        </div>
+        {/* Quick prompts */}
+        <div style={{display:'flex',flexWrap:'wrap',gap:4,marginTop:6}}>
+          {['Price now?','Latest news?','Bullish or bearish?','Compare to S&P?'].map(p => (
+            <button key={p} onClick={()=>setInput(p)} style={{
+              background:'none',border:'1px solid var(--border)',color:'var(--text3)',
+              padding:'2px 8px',borderRadius:10,fontSize:10,cursor:'pointer',
+              fontFamily:'var(--mono)',transition:'all 0.15s',
+            }}
+              onMouseEnter={e=>{e.currentTarget.style.borderColor='var(--accent)';e.currentTarget.style.color='var(--accent)';}}
+              onMouseLeave={e=>{e.currentTarget.style.borderColor='var(--border)';e.currentTarget.style.color='var(--text3)';}}
+            >{p}</button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main Stock View ───────────────────────────────────────────
+function StockView({ ticker }) {
+  const [data, setData] = useState(null);
+  const [bars, setBars] = useState([]);
+  const [range, setRange] = useState('1M');
+  const [loading, setLoading] = useState(true);
+  const [histLoading, setHistLoading] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`${API}/stock/${ticker}`)
+      .then(r => r.json())
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [ticker]);
+
+  useEffect(() => {
+    setHistLoading(true);
+    fetch(`${API}/stock/${ticker}/history?range=${range}`)
+      .then(r => r.json())
+      .then(d => { setBars(d.bars || []); setHistLoading(false); })
+      .catch(() => setHistLoading(false));
+  }, [ticker, range]);
+
+  if (loading) return (
+    <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:10}}>
+      <Spinner size={20}/> <span style={{color:'var(--text3)',fontFamily:'var(--mono)',fontSize:12}}>Loading {ticker}...</span>
+    </div>
+  );
+
+  const snap = data?.snapshot;
+  const details = data?.details;
+  const news = data?.news || [];
+  const up = snap?.change_pct >= 0;
+  const pctChange = bars.length > 1
+    ? ((bars[bars.length-1]?.close - bars[0]?.close) / bars[0]?.close * 100)
+    : null;
+
+  return (
+    <div style={{flex:1,overflowY:'auto',padding:'24px 28px',animation:'fadeIn 0.3s ease'}}>
+      {/* Header */}
+      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:24,flexWrap:'wrap',gap:16}}>
+        <div>
+          <div style={{display:'flex',alignItems:'baseline',gap:12}}>
+            <div style={{fontSize:32,fontWeight:700,letterSpacing:'-0.02em'}}>{ticker}</div>
+            {details?.name && (
+              <div style={{fontSize:14,color:'var(--text2)',fontWeight:400}}>{details.name}</div>
+            )}
+          </div>
+          {details?.sector && (
+            <div style={{fontSize:11,color:'var(--text3)',fontFamily:'var(--mono)',marginTop:3}}>
+              {details.sector}
+            </div>
+          )}
+        </div>
+        {snap && (
+          <div style={{textAlign:'right'}}>
+            <div style={{fontSize:36,fontWeight:700,fontFamily:'var(--mono)',letterSpacing:'-0.02em'}}>
+              ${fmt(snap.price)}
+            </div>
+            <div style={{
+              fontSize:16,fontFamily:'var(--mono)',fontWeight:700,
+              color: up ? 'var(--green)' : 'var(--red)',
+            }}>
+              {up ? '+' : ''}{fmt(snap.change)} ({up ? '+' : ''}{fmt(snap.change_pct)}%)
+            </div>
+            <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>15-min delayed</div>
+          </div>
+        )}
+      </div>
+
+      {/* Stats row */}
+      {snap && (
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(120px,1fr))',gap:8,marginBottom:20}}>
+          {[
+            {label:'OPEN', value:`$${fmt(snap.open)}`},
+            {label:'HIGH', value:`$${fmt(snap.high)}`},
+            {label:'LOW', value:`$${fmt(snap.low)}`},
+            {label:'PREV CLOSE', value:`$${fmt(snap.prev_close)}`},
+            {label:'VOLUME', value:fmtVol(snap.volume)},
+            {label:'MKT CAP', value:fmtBig(details?.market_cap)},
+          ].map(({label,value}) => (
+            <div key={label} style={{
+              background:'var(--bg3)',border:'1px solid var(--border)',
+              borderRadius:8,padding:'10px 12px',
+            }}>
+              <div style={{fontSize:9,color:'var(--text3)',fontFamily:'var(--mono)',letterSpacing:'0.1em',marginBottom:4}}>{label}</div>
+              <div style={{fontSize:14,fontWeight:600,fontFamily:'var(--mono)',color:'var(--text)'}}>{value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Chart */}
+      <div style={{background:'var(--bg3)',border:'1px solid var(--border)',borderRadius:10,padding:'16px',marginBottom:20}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <span style={{fontSize:12,fontWeight:600,color:'var(--text2)'}}>Price History</span>
+            {pctChange !== null && (
+              <span style={{
+                fontSize:11,fontFamily:'var(--mono)',fontWeight:700,
+                color: pctChange >= 0 ? 'var(--green)' : 'var(--red)',
+              }}>
+                {pctChange >= 0 ? '+' : ''}{fmt(pctChange)}% this period
+              </span>
+            )}
+          </div>
+          <div style={{display:'flex',gap:4}}>
+            {['1D','1W','1M','1Y'].map(r => (
+              <button key={r} onClick={() => setRange(r)} style={{
+                padding:'4px 10px',borderRadius:6,fontSize:11,
+                fontFamily:'var(--mono)',fontWeight:700,border:'none',
+                background: range === r ? 'var(--accent)' : 'var(--bg2)',
+                color: range === r ? 'white' : 'var(--text3)',
+                cursor:'pointer',transition:'all 0.15s',
+              }}>{r}</button>
+            ))}
+          </div>
+        </div>
+        {histLoading ? (
+          <div style={{height:200,display:'flex',alignItems:'center',justifyContent:'center'}}>
+            <Spinner/>
+          </div>
+        ) : (
+          <PriceChart bars={bars} range={range} ticker={ticker}/>
+        )}
+      </div>
+
+      {/* News */}
+      {news.length > 0 && (
+        <div>
+          <div style={{fontSize:11,color:'var(--text3)',fontFamily:'var(--mono)',letterSpacing:'0.1em',marginBottom:10}}>LATEST NEWS</div>
+          <div style={{display:'flex',flexDirection:'column',gap:6}}>
+            {news.map((a,i) => <NewsCard key={i} article={a}/>)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────
+function App() {
+  const [activeTicker, setActiveTicker] = useState('AAPL');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const searchTimer = useRef(null);
+
+  const handleSearch = (q) => {
+    setSearchQuery(q);
+    clearTimeout(searchTimer.current);
+    if (!q.trim()) { setSearchResults([]); return; }
+    searchTimer.current = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const res = await fetch(`${API}/search?q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        setSearchResults(data.results || []);
+      } catch {}
+      setSearching(false);
+    }, 400);
+  };
+
+  return (
+    <div style={{display:'flex',height:'100vh',background:'var(--bg)',overflow:'hidden'}}>
+
+      {/* ── Left Sidebar — Watchlist ── */}
+      <div style={{
+        width:220,flexShrink:0,borderRight:'1px solid var(--border)',
+        display:'flex',flexDirection:'column',background:'var(--bg)',
+      }}>
+        {/* Logo */}
+        <div style={{padding:'18px 16px 12px',borderBottom:'1px solid var(--border)'}}>
+          <div style={{fontSize:20,fontWeight:700,letterSpacing:'-0.02em'}}>
+            Stock<span style={{color:'var(--accent)'}}>AI</span>
+          </div>
+          <div style={{fontSize:9,color:'var(--text3)',fontFamily:'var(--mono)',marginTop:1,letterSpacing:'0.1em'}}>
+            MARKET INTELLIGENCE
+          </div>
+        </div>
+
+        {/* Search */}
+        <div style={{padding:'10px 12px',borderBottom:'1px solid var(--border)',position:'relative'}}>
+          <input
+            value={searchQuery}
+            onChange={e => handleSearch(e.target.value)}
+            placeholder="Search ticker or company..."
+            style={{
+              width:'100%',background:'var(--bg3)',border:'1px solid var(--border)',
+              borderRadius:7,padding:'7px 10px',color:'var(--text)',fontSize:12,
+              transition:'border-color 0.15s',
+            }}
+            onFocus={e=>e.target.style.borderColor='var(--accent)'}
+            onBlur={e=>{ e.target.style.borderColor='var(--border)'; setTimeout(()=>setSearchResults([]),200); }}
+          />
+          {/* Search dropdown */}
+          {searchResults.length > 0 && (
+            <div style={{
+              position:'absolute',top:'100%',left:12,right:12,
+              background:'var(--surface)',border:'1px solid var(--border2)',
+              borderRadius:8,zIndex:50,overflow:'hidden',
+              boxShadow:'0 8px 24px rgba(0,0,0,0.5)',
+            }}>
+              {searchResults.map(r => (
+                <div key={r.ticker} onClick={() => { setActiveTicker(r.ticker); setSearchQuery(''); setSearchResults([]); }}
+                  style={{
+                    padding:'8px 12px',cursor:'pointer',transition:'background 0.1s',
+                    display:'flex',justifyContent:'space-between',alignItems:'center',
+                  }}
+                  onMouseEnter={e=>e.currentTarget.style.background='var(--bg3)'}
+                  onMouseLeave={e=>e.currentTarget.style.background='transparent'}
+                >
+                  <div>
+                    <div style={{fontWeight:600,fontSize:12,color:'var(--accent2)'}}>{r.ticker}</div>
+                    <div style={{fontSize:10,color:'var(--text3)',marginTop:1}}>{r.name}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Watchlist */}
+        <div style={{flex:1,overflowY:'auto',padding:'8px'}}>
+          <div style={{fontSize:9,color:'var(--text3)',fontFamily:'var(--mono)',letterSpacing:'0.1em',padding:'6px 6px 4px'}}>
+            WATCHLIST
+          </div>
+          {WATCHLIST.map((t, i) => (
+            <WatchItem key={t} ticker={t} index={i} active={activeTicker===t} onClick={()=>setActiveTicker(t)}/>
+          ))}
+        </div>
+
+        {/* Footer note */}
+        <div style={{padding:'10px 14px',borderTop:'1px solid var(--border)'}}>
+          <div style={{fontSize:9,color:'var(--text3)',fontFamily:'var(--mono)',lineHeight:1.5}}>
+            ⏱ Prices 15-min delayed<br/>Data: Polygon.io
+          </div>
+        </div>
+      </div>
+
+      {/* ── Main Stock View ── */}
+      <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden',minWidth:0}}>
+        {/* Top bar */}
+        <div style={{
+          padding:'12px 28px',borderBottom:'1px solid var(--border)',
+          display:'flex',alignItems:'center',gap:8,flexShrink:0,
+          background:'var(--bg)',
+        }}>
+          <div style={{
+            width:8,height:8,borderRadius:'50%',background:'var(--green)',
+            animation:'pulse 2s ease infinite',
+          }}/>
+          <span style={{fontSize:11,color:'var(--text3)',fontFamily:'var(--mono)'}}>
+            LIVE MARKET DATA
+          </span>
+          <div style={{flex:1}}/>
+          <div style={{fontSize:11,color:'var(--text3)',fontFamily:'var(--mono)'}}>
+            {new Date().toLocaleDateString('en-US', {weekday:'short',month:'short',day:'numeric',year:'numeric'})}
+          </div>
+        </div>
+
+        <StockView ticker={activeTicker}/>
+      </div>
+
+      {/* ── Right Sidebar — AI Chat ── */}
+      <div style={{
+        width:300,flexShrink:0,borderLeft:'1px solid var(--border)',
+        display:'flex',flexDirection:'column',background:'var(--bg)',
+      }}>
+        <ChatPanel contextTicker={activeTicker}/>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
