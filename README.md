@@ -207,7 +207,7 @@ Open **http://localhost:8000**
 
 ## 📄 License
 
-MIT — do whatever you want with it.
+MIT 
 
 ---
 
